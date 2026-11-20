@@ -34,6 +34,8 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 .btn{background:var(--panel);color:var(--fg);border:0;border-radius:12px;min-width:44px;height:44px;padding:0 12px;font-size:13px;font-weight:600;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .btn.on{background:var(--acc)}
+.btn.warn{background:#b7791f}
+.btn.bad{background:#b3261e}
 .sl{display:flex;align-items:center;gap:10px;background:var(--panel);border-radius:12px;padding:8px 12px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .sl label{font-size:12px;color:var(--mut);width:62px}
 .sl input{flex:1;accent-color:var(--acc)}
@@ -65,6 +67,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
     <button class="btn" id="flipCam">⟲ Cam</button>
     <button class="btn" id="torch">Torch</button>
     <button class="btn" id="fs">⛶</button>
+    <button class="btn" id="anchor">📌 Anchor</button>
     <button class="btn" id="min">Hide UI</button>
   </div>
   <div id="bot">
@@ -82,6 +85,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
   </div>
 </div>
 
+<script src="tracker.js"></script>
 <script>
 (()=>{
 const $=id=>document.getElementById(id);
@@ -113,6 +117,7 @@ async function toggleTorch(){
 
 /* ---------- mode ---------- */
 async function setPaper(p){
+  stopAnchor();
   paper=p; stage.classList.toggle('paper',p); $('mode').textContent=p?'Camera':'Lightbox';
   $('flipCam').classList.toggle('hidden',p); $('torch').classList.toggle('hidden',p);
   if(p){stopCam(); cam.classList.add('hidden'); keepAwake();}
@@ -122,10 +127,11 @@ async function setPaper(p){
 /* ---------- wake lock ---------- */
 let wl=null;
 async function keepAwake(){try{if('wakeLock' in navigator&&!wl){wl=await navigator.wakeLock.request('screen');wl.addEventListener('release',()=>wl=null)}}catch{}}
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){keepAwake(); if(!paper&&srcImg&&!stream)startCam()}});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){keepAwake(); if(!paper&&srcImg&&!stream){stopAnchor();startCam()}}});
 
 /* ---------- image load + processing ---------- */
 function loadFile(f){
+  stopAnchor();
   if(!f)return; const url=URL.createObjectURL(f); const im=new Image();
   im.onload=()=>{srcImg=im; fitReset(); render(); URL.revokeObjectURL(url)};
   im.onerror=()=>toast('Cannot read image'); im.src=url;
@@ -179,9 +185,65 @@ function boxBlur(src,w,h,r){ // 3-pass separable box ≈ gaussian
   }
   return a;
 }
+/* ---------- paper anchoring: overlay follows paper when phone shakes ---------- */
+let A=[1,0,0,0]; // screen-space similarity [a,b,tx,ty] applied on top of T
+const TRK={on:false,feats:null,p:[1,0,0,0],sm:[1,0,0,0],lost:0,R:12,SW:240,cv:document.createElement('canvas'),ctx:null};
+function eff(){
+  if(A[0]===1&&A[1]===0&&A[2]===0&&A[3]===0)return T;
+  const W=innerWidth,H=innerHeight,cx=W/2+T.x,cy=H/2+T.y;
+  return {x:A[0]*cx-A[1]*cy+A[2]-W/2,y:A[1]*cx+A[0]*cy+A[3]-H/2,s:T.s*Math.hypot(A[0],A[1]),r:T.r+Math.atan2(A[1],A[0])};
+}
+function grabGray(){
+  const vw=cam.videoWidth,vh=cam.videoHeight;if(!vw||!vh)return null;
+  const w=TRK.SW,h=Math.round(w*vh/vw),c=TRK.cv;
+  if(c.width!==w||c.height!==h||!TRK.ctx){c.width=w;c.height=h;TRK.ctx=c.getContext('2d',{willReadFrequently:true})}
+  TRK.ctx.drawImage(cam,0,0,w,h);
+  const d=TRK.ctx.getImageData(0,0,w,h).data,g=new Float32Array(w*h);
+  for(let i=0,j=0;i<g.length;i++,j+=4)g[i]=.299*d[j]+.587*d[j+1]+.114*d[j+2];
+  TRK.vw=vw;TRK.vh=vh;TRK.w=w;TRK.h=h;return g;
+}
+function toScreen(p){ // tracker px (object-fit:cover video) -> screen px
+  const W=innerWidth,H=innerHeight,k=Math.max(W/TRK.vw,H/TRK.vh),m=k*TRK.vw/TRK.w,ox=(W-TRK.vw*k)/2,oy=(H-TRK.vh*k)/2,[a,b,tx,ty]=p;
+  return [a,b,ox-(a*ox-b*oy)+m*tx,oy-(b*ox+a*oy)+m*ty];
+}
+function anchorUI(st){
+  const b=$('anchor');b.classList.remove('on','warn','bad');
+  b.textContent={off:'📌 Anchor',ok:'📌 Anchored',weak:'📌 Weak',lost:'📌 Lost'}[st];
+  if(st==='ok')b.classList.add('on');else if(st==='weak')b.classList.add('warn');else if(st==='lost')b.classList.add('bad');
+}
+function startAnchor(){
+  if(!srcImg)return toast('Pick an image first');
+  if(paper||!stream)return toast('Anchor needs camera mode');
+  if(facing!=='environment')return toast('Use rear camera');
+  const g=grabGray();if(!g)return toast('Camera not ready');
+  const f=PaperTracker.select(g,TRK.w,TRK.h,TRK.R);
+  if(f.length<6)return toast('Paper too plain: draw ~6 small X marks around edges');
+  Object.assign(TRK,{feats:f,p:[1,0,0,0],sm:[1,0,0,0],lost:0,on:true});A=[1,0,0,0];
+  setLock(true,true);anchorUI('ok');toast('Anchored to paper');loop();
+}
+function stopAnchor(){
+  if(!TRK.on)return;TRK.on=false;
+  const e=eff();T.x=e.x;T.y=e.y;T.s=e.s;T.r=e.r;A=[1,0,0,0];apply();anchorUI('off');
+}
+function loop(){
+  if(!TRK.on)return;
+  const next=()=>{if(!TRK.on)return;step();loop()};
+  if(cam.requestVideoFrameCallback)cam.requestVideoFrameCallback(next);else requestAnimationFrame(next);
+}
+function step(){
+  const g=grabGray();if(!g)return;
+  const r=PaperTracker.robustFit(PaperTracker.track(g,TRK.w,TRK.h,TRK.feats,TRK.p,TRK.R));
+  if(r){
+    TRK.p=r.p;TRK.lost=0;
+    for(let i=0;i<4;i++)TRK.sm[i]+=(TRK.p[i]-TRK.sm[i])*.7; // light smoothing vs jitter
+    A=toScreen(TRK.sm);apply();anchorUI(r.inliers>=8?'ok':'weak');
+  }else if(++TRK.lost>8)anchorUI('lost');
+}
+
 function apply(){
+  const e=eff();
   ov.style.opacity=opacity;
-  ov.style.transform=`translate(-50%,-50%) translate(${T.x}px,${T.y}px) rotate(${T.r}rad) scale(${T.s*T.fh},${T.s*T.fv})`;
+  ov.style.transform=`translate(-50%,-50%) translate(${e.x}px,${e.y}px) rotate(${e.r}rad) scale(${e.s*T.fh},${e.s*T.fv})`;
 }
 
 /* ---------- gestures: drag, pinch-zoom, twist-rotate ---------- */
@@ -214,13 +276,19 @@ file.onchange=async()=>{const f=file.files[0];file.value='';if(!f)return;
 $('pickBig').onclick=openPicker; $('pick').onclick=openPicker;
 $('paperBig').onclick=()=>{setPaper(true);openPicker()};
 $('mode').onclick=()=>setPaper(!paper);
-$('flipCam').onclick=()=>{facing=facing==='environment'?'user':'environment';startCam()};
+$('flipCam').onclick=()=>{stopAnchor();facing=facing==='environment'?'user':'environment';startCam()};
 $('torch').onclick=toggleTorch;
 $('fs').onclick=()=>{const d=document;if(!d.fullscreenElement)d.documentElement.requestFullscreen?.().catch(()=>toast('Fullscreen n/a'));else d.exitFullscreen()};
 $('min').onclick=()=>{ui.classList.toggle('min');$('min').textContent=ui.classList.contains('min')?'Show UI':'Hide UI'};
 $('op').oninput=e=>{opacity=e.target.value/100;$('opv').textContent=e.target.value+'%';apply()};
 let skT;$('sk').oninput=e=>{sketch=+e.target.value;$('skv').textContent=sketch?sketch+'%':'off';clearTimeout(skT);skT=setTimeout(render,120)};
-$('lock').onclick=()=>{locked=!locked;$('lock').textContent=locked?'🔒 Locked':'🔓 Lock';$('lock').classList.toggle('on',locked);toast(locked?'Locked':'Unlocked');pts.clear()};
+function setLock(v,quiet){
+  locked=v;$('lock').textContent=v?'🔒 Locked':'🔓 Lock';$('lock').classList.toggle('on',v);pts.clear();
+  if(!v)stopAnchor();
+  if(!quiet)toast(v?'Locked':'Unlocked');
+}
+$('lock').onclick=()=>setLock(!locked);
+$('anchor').onclick=()=>TRK.on?(stopAnchor(),toast('Anchor off')):startAnchor();
 $('fh').onclick=()=>{T.fh*=-1;apply()}; $('fv').onclick=()=>{T.fv*=-1;apply()};
 $('rot').onclick=()=>{T.r+=Math.PI/2;apply()};
 $('gridB').onclick=()=>{const g=$('grid');const on=g.style.display!=='block';g.style.display=on?'block':'none';$('gridB').classList.toggle('on',on)};
