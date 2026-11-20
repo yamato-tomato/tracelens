@@ -19,6 +19,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:15px/1.
 #stage{position:fixed;inset:0;overflow:hidden;background:#000}
 #stage.paper{background:#fff}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#gl{position:absolute;inset:0;width:100%;height:100%;display:none}
 #grid{position:absolute;inset:0;pointer-events:none;display:none;
  background-image:linear-gradient(rgba(255,255,255,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.35) 1px,transparent 1px);background-size:40px 40px}
 #stage.paper #grid{background-image:linear-gradient(rgba(0,0,0,.18) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.18) 1px,transparent 1px)}
@@ -48,6 +49,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 <body>
 <div id="stage">
   <video id="cam" playsinline muted autoplay></video>
+  <canvas id="gl"></canvas>
   <div id="grid"></div>
   <img id="ov" alt="">
   <div id="hint">
@@ -185,9 +187,14 @@ function boxBlur(src,w,h,r){ // 3-pass separable box ≈ gaussian
   }
   return a;
 }
-/* ---------- paper anchoring: overlay follows paper when phone shakes ---------- */
-let A=[1,0,0,0]; // screen-space similarity [a,b,tx,ty] applied on top of T
-const TRK={on:false,feats:null,p:[1,0,0,0],sm:[1,0,0,0],lost:0,R:12,SW:240,cv:document.createElement('canvas'),ctx:null};
+/* ---------- paper anchoring ----------
+   Tracks the paper (perspective homography H: keyframe px -> live px).
+   WebGL path: redraw each camera frame warped by H so the paper stays still on screen;
+   overlay never moves, and video + overlay come from the same frame (no lag).
+   Fallback (no WebGL): overlay follows paper via CSS. */
+let A=[1,0,0,0]; // screen-space similarity applied on top of T (fallback / bake only)
+const ID=[1,0,0,0,1,0,0,0,1];
+const TRK={on:false,feats:null,H:ID,lost:0,R:12,SW:320,cv:document.createElement('canvas'),ctx:null};
 function eff(){
   if(A[0]===1&&A[1]===0&&A[2]===0&&A[3]===0)return T;
   const W=innerWidth,H=innerHeight,cx=W/2+T.x,cy=H/2+T.y;
@@ -202,10 +209,61 @@ function grabGray(){
   for(let i=0,j=0;i<g.length;i++,j+=4)g[i]=.299*d[j]+.587*d[j+1]+.114*d[j+2];
   TRK.vw=vw;TRK.vh=vh;TRK.w=w;TRK.h=h;return g;
 }
-function toScreen(p){ // tracker px (object-fit:cover video) -> screen px
-  const W=innerWidth,H=innerHeight,k=Math.max(W/TRK.vw,H/TRK.vh),m=k*TRK.vw/TRK.w,ox=(W-TRK.vw*k)/2,oy=(H-TRK.vh*k)/2,[a,b,tx,ty]=p;
-  return [a,b,ox-(a*ox-b*oy)+m*tx,oy-(b*ox+a*oy)+m*ty];
+function cover(){ // tracker px <-> screen px for object-fit:cover video
+  const W=innerWidth,H=innerHeight,k=Math.max(W/TRK.vw,H/TRK.vh);
+  return {ox:(W-TRK.vw*k)/2,oy:(H-TRK.vh*k)/2,mx:k*TRK.vw/TRK.w,my:k*TRK.vh/TRK.h};
 }
+function simFromH(H){ // best screen-space similarity approximating H (for fallback + bake)
+  const c=cover(),pairs=[];
+  for(const fx of [.1,.5,.9])for(const fy of [.1,.5,.9]){
+    const x=fx*TRK.w,y=fy*TRK.h,q=PaperTracker.applyH(H,x,y);
+    pairs.push([c.ox+x*c.mx,c.oy+y*c.my,c.ox+q[0]*c.mx,c.oy+q[1]*c.my]);
+  }
+  return PaperTracker.fit(pairs)||[1,0,0,0];
+}
+
+/* WebGL stabilised view */
+const glc=$('gl');let GL=null;
+function initGL(){
+  if(GL!==null)return GL;
+  const gl=glc.getContext('webgl',{alpha:false,antialias:false,preserveDrawingBuffer:false});
+  if(!gl)return GL=false;
+  const sh=(t,src)=>{const o=gl.createShader(t);gl.shaderSource(o,src);gl.compileShader(o);return gl.getShaderParameter(o,gl.COMPILE_STATUS)?o:null};
+  const vs=sh(gl.VERTEX_SHADER,'attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}');
+  const fs=sh(gl.FRAGMENT_SHADER,`precision highp float;
+uniform sampler2D tex;uniform mat3 H;uniform vec2 O;uniform vec2 M;uniform vec2 WH;uniform float CH;uniform float DPR;
+void main(){
+  vec2 s=vec2(gl_FragCoord.x,CH-gl_FragCoord.y)/DPR;
+  vec3 c=H*vec3((s-O)/M,1.);
+  vec2 uv=c.xy/c.z/WH;
+  if(c.z<=0.||uv.x<0.||uv.y<0.||uv.x>1.||uv.y>1.)gl_FragColor=vec4(.07,.07,.08,1.);
+  else gl_FragColor=texture2D(tex,uv);
+}`);
+  if(!vs||!fs)return GL=false;
+  const pr=gl.createProgram();gl.attachShader(pr,vs);gl.attachShader(pr,fs);gl.linkProgram(pr);
+  if(!gl.getProgramParameter(pr,gl.LINK_STATUS))return GL=false;
+  gl.useProgram(pr);
+  const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+  const loc=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
+  for(const [k,v] of [[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE],[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR]])gl.texParameteri(gl.TEXTURE_2D,k,v);
+  const u={};for(const n of ['H','O','M','WH','CH','DPR'])u[n]=gl.getUniformLocation(pr,n);
+  return GL={gl,u};
+}
+function drawStab(H){
+  const {gl,u}=GL,dpr=Math.min(2,devicePixelRatio||1),W=innerWidth,Hh=innerHeight;
+  const cw=Math.round(W*dpr),ch=Math.round(Hh*dpr);
+  if(glc.width!==cw||glc.height!==ch){glc.width=cw;glc.height=ch}
+  gl.viewport(0,0,cw,ch);
+  try{gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,cam)}catch(e){return}
+  const c=cover();
+  gl.uniformMatrix3fv(u.H,false,[H[0],H[3],H[6],H[1],H[4],H[7],H[2],H[5],H[8]]);
+  gl.uniform2f(u.O,c.ox,c.oy);gl.uniform2f(u.M,c.mx,c.my);gl.uniform2f(u.WH,TRK.w,TRK.h);
+  gl.uniform1f(u.CH,ch);gl.uniform1f(u.DPR,cw/W);
+  gl.drawArrays(gl.TRIANGLES,0,6);
+}
+
 function anchorUI(st){
   const b=$('anchor');b.classList.remove('on','warn','bad');
   b.textContent={off:'📌 Anchor',ok:'📌 Anchored',weak:'📌 Weak',lost:'📌 Lost'}[st];
@@ -216,13 +274,16 @@ function startAnchor(){
   if(paper||!stream)return toast('Anchor needs camera mode');
   if(facing!=='environment')return toast('Use rear camera');
   const g=grabGray();if(!g)return toast('Camera not ready');
-  const f=PaperTracker.select(g,TRK.w,TRK.h,TRK.R);
-  if(f.length<6)return toast('Paper too plain: draw ~6 small X marks around edges');
-  Object.assign(TRK,{feats:f,p:[1,0,0,0],sm:[1,0,0,0],lost:0,on:true});A=[1,0,0,0];
-  setLock(true,true);anchorUI('ok');toast('Anchored to paper');loop();
+  const f=PaperTracker.select(g,TRK.w,TRK.h,TRK.R,{gx:10,gy:6});
+  if(f.length<6)return toast('Paper too plain: draw ~6 small X marks or show table edge');
+  Object.assign(TRK,{feats:f,H:ID,lost:0,on:true});A=[1,0,0,0];
+  TRK.gl=!!initGL();
+  if(TRK.gl){drawStab(ID);glc.style.display='block'}
+  setLock(true,true);anchorUI('ok');toast(TRK.gl?'Anchored: view stabilised':'Anchored');loop();
 }
 function stopAnchor(){
-  if(!TRK.on)return;TRK.on=false;
+  if(!TRK.on)return;TRK.on=false;glc.style.display='none';
+  A=simFromH(TRK.H); // put overlay where the paper now is in the live view
   const e=eff();T.x=e.x;T.y=e.y;T.s=e.s;T.r=e.r;A=[1,0,0,0];apply();anchorUI('off');
 }
 function loop(){
@@ -232,12 +293,11 @@ function loop(){
 }
 function step(){
   const g=grabGray();if(!g)return;
-  const r=PaperTracker.robustFit(PaperTracker.track(g,TRK.w,TRK.h,TRK.feats,TRK.p,TRK.R));
-  if(r){
-    TRK.p=r.p;TRK.lost=0;
-    for(let i=0;i<4;i++)TRK.sm[i]+=(TRK.p[i]-TRK.sm[i])*.7; // light smoothing vs jitter
-    A=toScreen(TRK.sm);apply();anchorUI(r.inliers>=8?'ok':'weak');
-  }else if(++TRK.lost>8)anchorUI('lost');
+  const r=PaperTracker.robustFitH(PaperTracker.track(g,TRK.w,TRK.h,TRK.feats,TRK.H,TRK.R),TRK.w,TRK.h,TRK.H);
+  if(r){TRK.H=r.H;TRK.lost=0;anchorUI(r.model==='h'?'ok':'weak')}
+  else if(++TRK.lost>8)anchorUI('lost');
+  if(TRK.gl)drawStab(TRK.H);           // same frame as tracked -> no lag
+  else{A=simFromH(TRK.H);apply()}
 }
 
 function apply(){

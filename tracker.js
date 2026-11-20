@@ -75,9 +75,9 @@
   function track(g, w, h, feats, p, R, maxAvg) {
     maxAvg = maxAvg || 6;
     const I = integral(g, w, h), out = [];
-    const [a, b, tx, ty] = p;
+    const H = p.length === 9 ? p : simToH(p);
     for (const f of feats) {
-      const cx = Math.round(a * f.x - b * f.y + tx), cy = Math.round(b * f.x + a * f.y + ty);
+      const q = applyH(H, f.x, f.y), cx = Math.round(q[0]), cy = Math.round(q[1]);
       if (cx - R - P < 1 || cy - R - P < 1 || cx + R + P > w - 2 || cy + R + P > h - 2) continue;
       let best = Infinity, bx = 0, by = 0;
       for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
@@ -131,6 +131,99 @@
     return { p, inliers: cur.length };
   }
 
-  const api = { select, track, robustFit, fit, P };
+  /* ---------- homography (handles phone tilt) ---------- */
+  function simToH(p) { return [p[0], -p[1], p[2], p[1], p[0], p[3], 0, 0, 1]; }
+  function applyH(H, x, y) {
+    const z = H[6] * x + H[7] * y + H[8];
+    return [(H[0] * x + H[1] * y + H[2]) / z, (H[3] * x + H[4] * y + H[5]) / z];
+  }
+  function mul3(A, B) {
+    const C = new Array(9);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) C[r * 3 + c] = A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c];
+    return C;
+  }
+  function inv3(m) {
+    const [a, b, c, d, e, f, g, h, i] = m, A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C; if (Math.abs(det) < 1e-12) return null;
+    return [A / det, -(b * i - c * h) / det, (b * f - c * e) / det, B / det, (a * i - c * g) / det, -(a * f - c * d) / det, C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
+  }
+  function solve(M, v) { // Gaussian elimination with partial pivoting, n x n
+    const n = v.length;
+    for (let c = 0; c < n; c++) {
+      let piv = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+      if (Math.abs(M[piv][c]) < 1e-12) return null;
+      [M[c], M[piv]] = [M[piv], M[c]]; [v[c], v[piv]] = [v[piv], v[c]];
+      for (let r = c + 1; r < n; r++) { const f = M[r][c] / M[c][c]; if (!f) continue; for (let k = c; k < n; k++) M[r][k] -= f * M[c][k]; v[r] -= f * v[c]; }
+    }
+    const x = new Array(n);
+    for (let r = n - 1; r >= 0; r--) { let s = v[r]; for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k]; x[r] = s / M[r][r]; }
+    return x;
+  }
+  function normT(pts) { // Hartley normalisation
+    let mx = 0, my = 0; for (const [x, y] of pts) { mx += x; my += y; } mx /= pts.length; my /= pts.length;
+    let d = 0; for (const [x, y] of pts) d += Math.hypot(x - mx, y - my); d = d / pts.length || 1;
+    const s = Math.SQRT2 / d; return [s, 0, -s * mx, 0, s, -s * my, 0, 0, 1];
+  }
+  /* Least-squares homography from [x,y,u,v] pairs (>= 4). */
+  function fitH(m) {
+    const Ts = normT(m.map(q => [q[0], q[1]])), Td = normT(m.map(q => [q[2], q[3]]));
+    const AtA = Array.from({ length: 8 }, () => new Array(8).fill(0)), Atb = new Array(8).fill(0);
+    const add = (row, rhs) => { for (let i = 0; i < 8; i++) { Atb[i] += row[i] * rhs; for (let j = 0; j < 8; j++) AtA[i][j] += row[i] * row[j]; } };
+    for (const [x0, y0, u0, v0] of m) {
+      const x = Ts[0] * x0 + Ts[2], y = Ts[4] * y0 + Ts[5], u = Td[0] * u0 + Td[2], v = Td[4] * v0 + Td[5];
+      add([x, y, 1, 0, 0, 0, -u * x, -u * y], u);
+      add([0, 0, 0, x, y, 1, -v * x, -v * y], v);
+    }
+    const h = solve(AtA, Atb); if (!h) return null;
+    const Tdi = inv3(Td); if (!Tdi) return null;
+    const H = mul3(Tdi, mul3([...h, 1], Ts));
+    return H.map(v => v / H[8]);
+  }
+  function plausibleH(H, w, h) {
+    const c = [[0, 0], [w, 0], [w, h], [0, h]].map(([x, y]) => applyH(H, x, y));
+    if (c.some(q => !isFinite(q[0]) || !isFinite(q[1]))) return false;
+    let area = 0, sign = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = c[i], b = c[(i + 1) % 4], d = c[(i + 2) % 4];
+      const cr = (b[0] - a[0]) * (d[1] - b[1]) - (b[1] - a[1]) * (d[0] - b[0]);
+      if (sign === 0) sign = Math.sign(cr); else if (Math.sign(cr) !== sign) return false; // must stay convex
+      area += a[0] * b[1] - b[0] * a[1];
+    }
+    const ratio = Math.abs(area / 2) / (w * h);
+    return ratio > 0.3 && ratio < 3;
+  }
+  /* Robust homography; falls back to similarity when too few points. */
+  function robustFitH(m, w, h, prevH) {
+    if (m.length >= 12) {
+      let H = fitH(m), cur = m;
+      for (let it = 0; it < 3 && H; it++) {
+        const r = cur.map(([x, y, u, v]) => { const q = applyH(H, x, y); return Math.hypot(q[0] - u, q[1] - v); });
+        const med = r.slice().sort((a, b) => a - b)[r.length >> 1], thr = Math.max(0.8, 2.5 * med);
+        const inl = cur.filter((_, i) => r[i] <= thr);
+        if (inl.length < 12) { H = null; break; }
+        cur = inl; H = fitH(cur);
+      }
+      if (H && plausibleH(H, w, h)) return { H, inliers: cur.length, model: 'h' };
+    }
+    // too few points for full perspective: correct prev estimate by a similarity, keeping its tilt
+    const base = prevH || simToH([1, 0, 0, 0]);
+    const s = robustFit(m.map(([x, y, u, v]) => { const q = applyH(base, x, y); return [q[0], q[1], u, v]; }));
+    return s ? { H: mul3(simToH(s.p), base), inliers: s.inliers, model: 's' } : null;
+  }
+  /* Homography from exactly 4 point pairs. */
+  function fromCorners(src, dst) { return fitH(src.map((p, i) => [p[0], p[1], dst[i][0], dst[i][1]])); }
+
+  /* One-Euro filter: heavy smoothing when still, low lag when moving. */
+  function OneEuro(minCutoff, beta, dCutoff) { this.mc = minCutoff; this.beta = beta; this.dc = dCutoff || 1; this.x = null; }
+  const alpha = (dt, fc) => 1 / (1 + 1 / (2 * Math.PI * fc * dt));
+  OneEuro.prototype.filter = function (x, t) {
+    if (this.x === null) { this.x = x; this.dx = 0; this.t = t; return x; }
+    const dt = Math.max(1e-3, t - this.t); this.t = t;
+    this.dx += alpha(dt, this.dc) * ((x - this.x) / dt - this.dx);
+    this.x += alpha(dt, this.mc + this.beta * Math.abs(this.dx)) * (x - this.x);
+    return this.x;
+  };
+
+  const api = { select, track, robustFit, robustFitH, fit, fitH, applyH, inv3, mul3, simToH, fromCorners, OneEuro, P };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.PaperTracker = api;
 })(typeof self !== 'undefined' ? self : this);
