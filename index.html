@@ -20,6 +20,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:15px/1.
 #stage.paper{background:#fff}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 #gl{position:absolute;inset:0;width:100%;height:100%;display:none}
+#hud{position:fixed;left:12px;bottom:calc(env(safe-area-inset-bottom) + 4px);font:11px/1.2 ui-monospace,Menlo,monospace;color:#fff;background:rgba(0,0,0,.55);padding:3px 6px;border-radius:6px;z-index:7;pointer-events:none;display:none}
 #grid{position:absolute;inset:0;pointer-events:none;display:none;
  background-image:linear-gradient(rgba(255,255,255,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.35) 1px,transparent 1px);background-size:40px 40px}
 #stage.paper #grid{background-image:linear-gradient(rgba(0,0,0,.18) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.18) 1px,transparent 1px)}
@@ -61,6 +62,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 </div>
 <input type="file" id="file" accept="image/*" class="hidden">
 <div id="lockbadge"></div>
+<div id="hud"></div>
 
 <div id="ui" class="hidden">
   <div id="top">
@@ -70,6 +72,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
     <button class="btn" id="torch">Torch</button>
     <button class="btn" id="fs">⛶</button>
     <button class="btn" id="anchor">📌 Anchor</button>
+    <button class="btn" id="view">View: Steady</button>
     <button class="btn" id="min">Hide UI</button>
   </div>
   <div id="bot">
@@ -194,7 +197,7 @@ function boxBlur(src,w,h,r){ // 3-pass separable box ≈ gaussian
    Fallback (no WebGL): overlay follows paper via CSS. */
 let A=[1,0,0,0]; // screen-space similarity applied on top of T (fallback / bake only)
 const ID=[1,0,0,0,1,0,0,0,1];
-const TRK={on:false,feats:null,H:ID,lost:0,R:12,SW:320,cv:document.createElement('canvas'),ctx:null};
+const TRK={on:false,st:null,H:ID,lost:0,SW:320,view:'steady',cv:document.createElement('canvas'),ctx:null,n:0,t0:0,ms:0};
 function eff(){
   if(A[0]===1&&A[1]===0&&A[2]===0&&A[3]===0)return T;
   const W=innerWidth,H=innerHeight,cx=W/2+T.x,cy=H/2+T.y;
@@ -274,15 +277,16 @@ function startAnchor(){
   if(paper||!stream)return toast('Anchor needs camera mode');
   if(facing!=='environment')return toast('Use rear camera');
   const g=grabGray();if(!g)return toast('Camera not ready');
-  const f=PaperTracker.select(g,TRK.w,TRK.h,TRK.R,{gx:10,gy:6});
-  if(f.length<6)return toast('Paper too plain: draw ~6 small X marks or show table edge');
-  Object.assign(TRK,{feats:f,H:ID,lost:0,on:true});A=[1,0,0,0];
+  const st=PaperTracker.createTracker(g,TRK.w,TRK.h,{gx:8});
+  if(st.feats.length<8)return toast('Paper too plain: draw ~8 small X marks or show the table');
+  Object.assign(TRK,{st,H:ID,lost:0,on:true,n:0,t0:performance.now(),ms:0});A=[1,0,0,0];
+  $('hud').style.display='block';
   TRK.gl=!!initGL();
   if(TRK.gl){drawStab(ID);glc.style.display='block'}
   setLock(true,true);anchorUI('ok');toast(TRK.gl?'Anchored: view stabilised':'Anchored');loop();
 }
 function stopAnchor(){
-  if(!TRK.on)return;TRK.on=false;glc.style.display='none';
+  if(!TRK.on)return;TRK.on=false;glc.style.display='none';$('hud').style.display='none';
   A=simFromH(TRK.H); // put overlay where the paper now is in the live view
   const e=eff();T.x=e.x;T.y=e.y;T.s=e.s;T.r=e.r;A=[1,0,0,0];apply();anchorUI('off');
 }
@@ -293,11 +297,18 @@ function loop(){
 }
 function step(){
   const g=grabGray();if(!g)return;
-  const r=PaperTracker.robustFitH(PaperTracker.track(g,TRK.w,TRK.h,TRK.feats,TRK.H,TRK.R),TRK.w,TRK.h,TRK.H);
-  if(r){TRK.H=r.H;TRK.lost=0;anchorUI(r.model==='h'?'ok':'weak')}
-  else if(++TRK.lost>8)anchorUI('lost');
-  if(TRK.gl)drawStab(TRK.H);           // same frame as tracked -> no lag
-  else{A=simFromH(TRK.H);apply()}
+  const t=performance.now(),r=PaperTracker.step(TRK.st,g),dt=performance.now()-t;
+  TRK.ms=TRK.ms*.9+dt*.1;TRK.n++;
+  if(r){TRK.H=r.H;TRK.lost=0;anchorUI(r.inliers>=10&&r.model!=='c'?'ok':'weak')}
+  else if(++TRK.lost>5)anchorUI('lost');
+  // Steady: warp camera so paper holds still, overlay fixed. Follow: camera as-is, overlay follows.
+  // Both draw this exact tracked frame, so overlay and paper never get out of step.
+  if(TRK.view==='steady'&&TRK.gl){A=[1,0,0,0];drawStab(TRK.H);apply()}
+  else{if(TRK.gl)drawStab(ID);A=simFromH(TRK.H);apply()}
+  if(TRK.n%10===0){
+    const fps=TRK.n/((performance.now()-TRK.t0)/1000);
+    $('hud').textContent=`${fps.toFixed(0)}fps ${TRK.ms.toFixed(0)}ms ${r?r.model+' '+r.inliers+'/'+TRK.st.feats.length:'lost'} ${TRK.w}x${TRK.h}`;
+  }
 }
 
 function apply(){
@@ -348,6 +359,7 @@ function setLock(v,quiet){
   if(!quiet)toast(v?'Locked':'Unlocked');
 }
 $('lock').onclick=()=>setLock(!locked);
+$('view').onclick=()=>{TRK.view=TRK.view==='steady'?'follow':'steady';$('view').textContent='View: '+(TRK.view==='steady'?'Steady':'Follow')};
 $('anchor').onclick=()=>TRK.on?(stopAnchor(),toast('Anchor off')):startAnchor();
 $('fh').onclick=()=>{T.fh*=-1;apply()}; $('fv').onclick=()=>{T.fv*=-1;apply()};
 $('rot').onclick=()=>{T.r+=Math.PI/2;apply()};

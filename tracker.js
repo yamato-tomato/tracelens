@@ -224,6 +224,136 @@
     return this.x;
   };
 
-  const api = { select, track, robustFit, robustFitH, fit, fitH, applyH, inv3, mul3, simToH, fromCorners, OneEuro, P };
+  /* ================= v4 pipeline =================
+     - brightness-proof matching: patches standardised (zero mean, unit std) => immune to auto-exposure
+     - coarse-to-fine: half-res wide search fixes big shakes, full-res narrow search refines
+     - after loss: much wider coarse search to re-acquire */
+  function level(g, w, h) {
+    const W = w + 1, I = new Float64Array(W * (h + 1)), I2 = new Float64Array(W * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let s = 0, s2 = 0;
+      for (let x = 0; x < w; x++) { const v = g[y * w + x]; s += v; s2 += v * v; I[(y + 1) * W + x + 1] = I[y * W + x + 1] + s; I2[(y + 1) * W + x + 1] = I2[y * W + x + 1] + s2; }
+    }
+    return { g, w, h, I, I2 };
+  }
+  function halve(g, w, h) {
+    const w2 = w >> 1, h2 = h >> 1, o = new Float32Array(w2 * h2);
+    for (let y = 0; y < h2; y++) for (let x = 0; x < w2; x++) { const i = 2 * y * w + 2 * x; o[y * w2 + x] = (g[i] + g[i + 1] + g[i + w] + g[i + w + 1]) / 4; }
+    return [o, w2, h2];
+  }
+  function stdTpl(L, x, y) {
+    if (x - P < 0 || y - P < 0 || x + P >= L.w || y + P >= L.h) return null;
+    const t = new Float32Array(N); let k = 0, m = 0, m2 = 0;
+    for (let dy = -P; dy <= P; dy++) for (let dx = -P; dx <= P; dx++) { const v = L.g[(y + dy) * L.w + x + dx]; t[k++] = v; m += v; m2 += v * v; }
+    m /= N; const sd = Math.sqrt(Math.max(0, m2 / N - m * m)); if (sd < 3) return null;
+    for (k = 0; k < N; k++) t[k] = (t[k] - m) / sd;
+    t.sd = sd; return t;
+  }
+  function ncost(L, t, x, y, limit, minSd) {
+    const W = L.w + 1, x0 = x - P, y0 = y - P, x1 = x + P + 1, y1 = y + P + 1;
+    const s1 = L.I[y1 * W + x1] - L.I[y0 * W + x1] - L.I[y1 * W + x0] + L.I[y0 * W + x0];
+    const s2 = L.I2[y1 * W + x1] - L.I2[y0 * W + x1] - L.I2[y1 * W + x0] + L.I2[y0 * W + x0];
+    const m = s1 / N, v = s2 / N - m * m;
+    if (v < minSd * minSd) return Infinity;           // flat (blank paper / hand): not a match
+    const inv = 1 / Math.sqrt(v), g = L.g, w = L.w;
+    let s = 0, k = 0;
+    for (let dy = -P; dy <= P; dy++) {
+      const row = (y + dy) * w + x - P;
+      for (let dx = 0; dx < PS; dx++) s += Math.abs((g[row + dx] - m) * inv - t[k++]);
+      if (s >= limit) return s;
+    }
+    return s;
+  }
+  function search(L, t, px, py, R, maxCost) {
+    const cx = Math.round(px), cy = Math.round(py);
+    const xa = Math.max(P, cx - R), xb = Math.min(L.w - 1 - P, cx + R), ya = Math.max(P, cy - R), yb = Math.min(L.h - 1 - P, cy + R);
+    if (xa > xb || ya > yb) return null;
+    const minSd = Math.max(2, t.sd * 0.25);
+    let best = Infinity, bx = 0, by = 0;
+    for (let y = ya; y <= yb; y++) for (let x = xa; x <= xb; x++) {
+      const c = ncost(L, t, x, y, best, minSd); if (c < best) { best = c; bx = x; by = y; }
+    }
+    if (!(best / N <= maxCost)) return null;
+    let ox = 0, oy = 0;
+    if (bx > P && bx < L.w - 1 - P) { const l = ncost(L, t, bx - 1, by, Infinity, 0), r = ncost(L, t, bx + 1, by, Infinity, 0), d = l - 2 * best + r; if (d > 0) ox = Math.max(-.5, Math.min(.5, (l - r) / (2 * d))); }
+    if (by > P && by < L.h - 1 - P) { const u = ncost(L, t, bx, by - 1, Infinity, 0), dn = ncost(L, t, bx, by + 1, Infinity, 0), d = u - 2 * best + dn; if (d > 0) oy = Math.max(-.5, Math.min(.5, (u - dn) / (2 * d))); }
+    return [bx + ox, by + oy];
+  }
+  const ID = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  /* RANSAC similarity: survives >50% bad matches (noise patches, hand, pencil). */
+  let rs = 12345; const rr = n => ((rs = (rs * 1103515245 + 12345) >>> 0) % n);
+  function ransacSim(m, thr, minInl) {
+    const n = m.length; if (n < minInl) return null;
+    let best = null, bestN = 0;
+    const iters = Math.min(120, n * (n - 1) / 2);
+    for (let it = 0; it < iters; it++) {
+      const i = rr(n); let j = rr(n); if (i === j) j = (j + 1) % n;
+      const p = fit([m[i], m[j]]); if (!p) continue;
+      const sc = Math.hypot(p[0], p[1]); if (sc < .6 || sc > 1.6) continue;
+      let c = 0; for (const [x, y, u, v] of m) if (Math.hypot(p[0] * x - p[1] * y + p[2] - u, p[1] * x + p[0] * y + p[3] - v) < thr) c++;
+      if (c > bestN) { bestN = c; best = p; }
+    }
+    if (!best || bestN < minInl) return null;
+    let p = best, inl;
+    for (let k = 0; k < 2; k++) {
+      inl = m.filter(([x, y, u, v]) => Math.hypot(p[0] * x - p[1] * y + p[2] - u, p[1] * x + p[0] * y + p[3] - v) < thr);
+      if (inl.length < minInl) return null;
+      p = fit(inl) || p;
+    }
+    return { p, inl };
+  }
+  function createTracker(g, w, h, opt) {
+    opt = opt || {};
+    const L0 = level(g, w, h), [g1, w1, h1] = halve(g, w, h), L1 = level(g1, w1, h1);
+    const gx = opt.gx || 8, gy = opt.gy || Math.max(4, Math.round(gx * h / w));
+    const pos = select(g, w, h, 4, { gx, gy, minScore: 150 });
+    const feats = [];
+    for (const f of pos) {
+      const t0 = stdTpl(L0, f.x, f.y), x1 = Math.round((f.x - .5) / 2), y1 = Math.round((f.y - .5) / 2), t1 = stdTpl(L1, x1, y1);
+      if (t0) feats.push({ x: f.x, y: f.y, t0, x1, y1, kx1: 2 * x1 + .5, ky1: 2 * y1 + .5, t1 });
+    }
+    return { w, h, feats, H: ID.slice(), lost: 0 };
+  }
+  /* Process one frame. Updates st.H; returns {H, model, inliers, matched} or null when lost. */
+  function step(st, g) {
+    const { w, h, feats } = st, H = st.H;
+    const L0 = level(g, w, h), [g1, w1, h1] = halve(g, w, h), L1 = level(g1, w1, h1);
+    const R2 = st.lost > 2 ? 28 : 14;
+    // coarse (half-res, wide): similarity correction on top of last H
+    const cp = [];
+    for (const f of feats) {
+      if (!f.t1) continue;
+      const q = applyH(H, f.kx1, f.ky1), m = search(L1, f.t1, (q[0] - .5) / 2, (q[1] - .5) / 2, R2, 0.7);
+      if (m) cp.push([q[0], q[1], 2 * m[0] + .5, 2 * m[1] + .5]);
+    }
+    const c = ransacSim(cp, 3, 6);
+    if (!c && st.lost > 0) { st.lost++; return null; }
+    const Hc = c ? mul3(simToH(c.p), H) : H;
+    // fine (full-res, narrow)
+    const fp = [], qp = [];
+    for (const f of feats) {
+      const q = applyH(Hc, f.x, f.y), m = search(L0, f.t0, q[0], q[1], 4, 0.6);
+      if (m) { fp.push([f.x, f.y, m[0], m[1]]); qp.push([q[0], q[1], m[0], m[1]]); }
+    }
+    const r = ransacSim(qp, 1.5, 5);
+    if (r) {
+      let Hn = mul3(simToH(r.p), Hc), model = 's', inl = r.inl.length;
+      const set = new Set(r.inl), kin = fp.filter((_, i) => set.has(qp[i]));
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const [x, y] of kin) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      if (inl >= 15 && x1 - x0 > .45 * w && y1 - y0 > .45 * h) { // many, well-spread points: full perspective fit
+        const Hh = fitH(kin);
+        if (Hh && plausibleH(Hh, w, h)) {
+          const res = kin.map(([x, y, u, v]) => { const z = applyH(Hh, x, y); return Math.hypot(z[0] - u, z[1] - v); });
+          if (res.reduce((a, b) => a + b, 0) / res.length < 1.2) { Hn = Hh; model = 'h'; }
+        }
+      }
+      st.H = Hn; st.lost = 0; return { H: Hn, model, inliers: inl, matched: fp.length };
+    }
+    if (c) { st.H = Hc; st.lost = 0; return { H: Hc, model: 'c', inliers: c.inl.length, matched: cp.length }; }
+    st.lost++; return null;
+  }
+
+  const api = { select, track, robustFit, robustFitH, fit, fitH, applyH, inv3, mul3, simToH, fromCorners, OneEuro, createTracker, step, P };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.PaperTracker = api;
 })(typeof self !== 'undefined' ? self : this);
