@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>TraceLens</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-title" content="TraceLens">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+:root{--bg:#000;--fg:#fff;--panel:rgba(20,20,22,.82);--acc:#4da3ff;--mut:#9aa0a6}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:15px/1.3 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+#stage{position:fixed;inset:0;overflow:hidden;background:#000}
+#stage.paper{background:#fff}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#grid{position:absolute;inset:0;pointer-events:none;display:none;
+ background-image:linear-gradient(rgba(255,255,255,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.35) 1px,transparent 1px);background-size:40px 40px}
+#stage.paper #grid{background-image:linear-gradient(rgba(0,0,0,.18) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.18) 1px,transparent 1px)}
+#ov{position:absolute;left:50%;top:50%;transform-origin:center center;will-change:transform,opacity;pointer-events:none;max-width:none}
+#hint{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;color:var(--mut)}
+#hint h1{margin:0;color:var(--fg);font-size:26px;font-weight:700}
+#hint p{margin:0;max-width:320px}
+.big{background:var(--acc);color:#fff;border:0;border-radius:14px;padding:14px 22px;font-size:16px;font-weight:600}
+.big.alt{background:#2a2a2e}
+#top,#bot{position:fixed;left:0;right:0;display:flex;gap:8px;padding:10px 12px;z-index:5;justify-content:center;flex-wrap:wrap}
+#top{top:0;padding-top:max(10px,env(safe-area-inset-top))}
+#bot{bottom:0;flex-direction:column;align-items:stretch;padding-bottom:max(12px,env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.6))}
+.row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+.btn{background:var(--panel);color:var(--fg);border:0;border-radius:12px;min-width:44px;height:44px;padding:0 12px;font-size:13px;font-weight:600;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.btn.on{background:var(--acc)}
+.sl{display:flex;align-items:center;gap:10px;background:var(--panel);border-radius:12px;padding:8px 12px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.sl label{font-size:12px;color:var(--mut);width:62px}
+.sl input{flex:1;accent-color:var(--acc)}
+.sl span{font-size:12px;width:36px;text-align:right}
+#lockbadge{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel);padding:10px 16px;border-radius:12px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:6}
+.hidden{display:none!important}
+#ui.min #bot .row.extra,#ui.min .sl{display:none}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <div id="grid"></div>
+  <img id="ov" alt="">
+  <div id="hint">
+    <h1>TraceLens</h1>
+    <p>Pick an image, point phone at paper, trace the see-through overlay. Works offline. No ads, no tracking.</p>
+    <button class="big" id="pickBig">Choose image</button>
+    <button class="big alt" id="paperBig">Lightbox mode (no camera)</button>
+  </div>
+</div>
+<input type="file" id="file" accept="image/*" class="hidden">
+<div id="lockbadge"></div>
+
+<div id="ui" class="hidden">
+  <div id="top">
+    <button class="btn" id="pick">Image</button>
+    <button class="btn" id="mode">Lightbox</button>
+    <button class="btn" id="flipCam">⟲ Cam</button>
+    <button class="btn" id="torch">Torch</button>
+    <button class="btn" id="fs">⛶</button>
+    <button class="btn" id="min">Hide UI</button>
+  </div>
+  <div id="bot">
+    <div class="sl"><label>Opacity</label><input id="op" type="range" min="0" max="100" value="50"><span id="opv">50%</span></div>
+    <div class="sl"><label>Sketch</label><input id="sk" type="range" min="0" max="100" value="0"><span id="skv">off</span></div>
+    <div class="row extra">
+      <button class="btn" id="lock">🔓 Lock</button>
+      <button class="btn" id="fh">Flip H</button>
+      <button class="btn" id="fv">Flip V</button>
+      <button class="btn" id="rot">↻ 90°</button>
+      <button class="btn" id="gridB">Grid</button>
+      <button class="btn" id="bw">B/W</button>
+      <button class="btn" id="reset">Reset</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const stage=$('stage'),cam=$('cam'),ov=$('ov'),ui=$('ui'),hint=$('hint'),file=$('file');
+let srcImg=null, stream=null, facing='environment', paper=false, locked=false;
+let T={x:0,y:0,s:1,r:0,fh:1,fv:1};
+let opacity=.5, sketch=0, bw=false;
+
+const toast=t=>{const b=$('lockbadge');b.textContent=t;b.style.opacity=1;clearTimeout(toast.t);toast.t=setTimeout(()=>b.style.opacity=0,900)};
+
+/* ---------- camera ---------- */
+async function startCam(){
+  stopCam();
+  if(!navigator.mediaDevices?.getUserMedia){toast('Camera needs HTTPS');return false}
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    cam.srcObject=stream; cam.style.transform=facing==='user'?'scaleX(-1)':''; await cam.play().catch(()=>{});
+    return true;
+  }catch(e){toast('Camera blocked: '+e.name);return false}
+}
+function stopCam(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;cam.srcObject=null}}
+let torchOn=false;
+async function toggleTorch(){
+  const tr=stream?.getVideoTracks()[0]; if(!tr){toast('No camera');return}
+  const caps=tr.getCapabilities?.()||{}; if(!caps.torch){toast('Torch unsupported');return}
+  torchOn=!torchOn; await tr.applyConstraints({advanced:[{torch:torchOn}]}).catch(()=>toast('Torch failed'));
+  $('torch').classList.toggle('on',torchOn);
+}
+
+/* ---------- mode ---------- */
+async function setPaper(p){
+  paper=p; stage.classList.toggle('paper',p); $('mode').textContent=p?'Camera':'Lightbox';
+  $('flipCam').classList.toggle('hidden',p); $('torch').classList.toggle('hidden',p);
+  if(p){stopCam(); cam.classList.add('hidden'); keepAwake();}
+  else{cam.classList.remove('hidden'); await startCam();}
+}
+
+/* ---------- wake lock ---------- */
+let wl=null;
+async function keepAwake(){try{if('wakeLock' in navigator&&!wl){wl=await navigator.wakeLock.request('screen');wl.addEventListener('release',()=>wl=null)}}catch{}}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){keepAwake(); if(!paper&&srcImg&&!stream)startCam()}});
+
+/* ---------- image load + processing ---------- */
+function loadFile(f){
+  if(!f)return; const url=URL.createObjectURL(f); const im=new Image();
+  im.onload=()=>{srcImg=im; fitReset(); render(); URL.revokeObjectURL(url)};
+  im.onerror=()=>toast('Cannot read image'); im.src=url;
+}
+function fitReset(){
+  if(!srcImg)return;
+  const W=innerWidth*.85,H=innerHeight*.6;
+  T={x:0,y:0,s:Math.min(W/srcImg.naturalWidth,H/srcImg.naturalHeight),r:0,fh:1,fv:1}; apply();
+}
+// Pencil-sketch: gray -> invert -> blur -> color-dodge. Blend with original by `sketch`.
+let renderJob=0;
+function render(){
+  if(!srcImg)return; const job=++renderJob;
+  const MAX=2048, k=Math.min(1,MAX/Math.max(srcImg.naturalWidth,srcImg.naturalHeight));
+  const w=Math.round(srcImg.naturalWidth*k),h=Math.round(srcImg.naturalHeight*k);
+  const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d',{willReadFrequently:true});
+  x.drawImage(srcImg,0,0,w,h);
+  if(sketch>0||bw){
+    const d=x.getImageData(0,0,w,h),p=d.data,n=w*h,g=new Float32Array(n);
+    for(let i=0;i<n;i++)g[i]=.299*p[i*4]+.587*p[i*4+1]+.114*p[i*4+2];
+    let out=g;
+    if(sketch>0){
+      const inv=new Float32Array(n);for(let i=0;i<n;i++)inv[i]=255-g[i];
+      const bl=boxBlur(inv,w,h,Math.max(2,Math.round(Math.min(w,h)/120)));
+      const sk=new Float32Array(n);
+      for(let i=0;i<n;i++){const b=bl[i];let v=b>=255?255:Math.min(255,g[i]*255/(255-b));sk[i]=v}
+      // contrast boost so lines read on camera
+      const a=sketch/100; out=new Float32Array(n);
+      for(let i=0;i<n;i++){let v=sk[i];v=255-(255-v)*(1+2*a);v=v<0?0:v;out[i]=g[i]*(1-a)+v*a}
+    }
+    for(let i=0;i<n;i++){
+      if(bw||sketch>0){const v=out[i];
+        if(sketch>0&&!bw){const a=sketch/100;p[i*4]=p[i*4]*(1-a)+v*a;p[i*4+1]=p[i*4+1]*(1-a)+v*a;p[i*4+2]=p[i*4+2]*(1-a)+v*a}
+        else{p[i*4]=p[i*4+1]=p[i*4+2]=v}}
+    }
+    x.putImageData(d,0,0);
+  }
+  c.toBlob(b=>{if(job!==renderJob||!b)return;const u=URL.createObjectURL(b);const old=ov.src;
+    ov.onload=()=>{if(old.startsWith('blob:'))URL.revokeObjectURL(old)};
+    ov.style.width=srcImg.naturalWidth+'px';ov.style.height=srcImg.naturalHeight+'px';ov.src=u;},'image/png');
+}
+function boxBlur(src,w,h,r){ // 3-pass separable box ≈ gaussian
+  let a=src,b=new Float32Array(src.length);
+  for(let pass=0;pass<3;pass++){
+    for(let y=0;y<h;y++){let s=0,o=y*w;for(let i=-r;i<=r;i++)s+=a[o+Math.min(w-1,Math.max(0,i))];
+      for(let x=0;x<w;x++){b[o+x]=s/(2*r+1);s+=a[o+Math.min(w-1,x+r+1)]-a[o+Math.max(0,x-r)]}}
+    const t=new Float32Array(src.length);
+    for(let x=0;x<w;x++){let s=0;for(let i=-r;i<=r;i++)s+=b[Math.min(h-1,Math.max(0,i))*w+x];
+      for(let y=0;y<h;y++){t[y*w+x]=s/(2*r+1);s+=b[Math.min(h-1,y+r+1)*w+x]-b[Math.max(0,y-r)*w+x]}}
+    a=t;
+  }
+  return a;
+}
+function apply(){
+  ov.style.opacity=opacity;
+  ov.style.transform=`translate(-50%,-50%) translate(${T.x}px,${T.y}px) rotate(${T.r}rad) scale(${T.s*T.fh},${T.s*T.fv})`;
+}
+
+/* ---------- gestures: drag, pinch-zoom, twist-rotate ---------- */
+const pts=new Map(); let g0=null;
+function snap(){const a=[...pts.values()];
+  if(a.length===1)return{x:a[0].x,y:a[0].y,T:{...T}};
+  const [p,q]=a;return{cx:(p.x+q.x)/2,cy:(p.y+q.y)/2,d:Math.hypot(q.x-p.x,q.y-p.y),ang:Math.atan2(q.y-p.y,q.x-p.x),T:{...T}}}
+stage.addEventListener('pointerdown',e=>{if(locked||!srcImg)return;stage.setPointerCapture(e.pointerId);pts.set(e.pointerId,{x:e.clientX,y:e.clientY});g0=snap()});
+stage.addEventListener('pointermove',e=>{
+  if(locked||!pts.has(e.pointerId))return; pts.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  const a=[...pts.values()];
+  if(a.length===1&&g0.x!==undefined){T.x=g0.T.x+a[0].x-g0.x;T.y=g0.T.y+a[0].y-g0.y}
+  else if(a.length>=2&&g0.d){const [p,q]=a,cx=(p.x+q.x)/2,cy=(p.y+q.y)/2;
+    T.s=Math.max(.02,g0.T.s*Math.hypot(q.x-p.x,q.y-p.y)/g0.d);
+    T.r=g0.T.r+Math.atan2(q.y-p.y,q.x-p.x)-g0.ang;
+    T.x=g0.T.x+cx-g0.cx;T.y=g0.T.y+cy-g0.cy}
+  apply();
+});
+const up=e=>{pts.delete(e.pointerId);g0=pts.size?snap():null};
+stage.addEventListener('pointerup',up);stage.addEventListener('pointercancel',up);
+stage.addEventListener('wheel',e=>{if(locked||!srcImg)return;e.preventDefault();
+  if(e.shiftKey)T.r+=e.deltaY*.002;else T.s=Math.max(.02,T.s*Math.exp(-e.deltaY*.0015));apply()},{passive:false});
+document.addEventListener('gesturestart',e=>e.preventDefault()); // iOS Safari page zoom
+
+/* ---------- controls ---------- */
+const openPicker=()=>file.click();
+file.onchange=async()=>{const f=file.files[0];file.value='';if(!f)return;
+  const first=!srcImg; loadFile(f);
+  if(first){hint.classList.add('hidden');ui.classList.remove('hidden');if(!paper)await startCam();keepAwake()}};
+$('pickBig').onclick=openPicker; $('pick').onclick=openPicker;
+$('paperBig').onclick=()=>{setPaper(true);openPicker()};
+$('mode').onclick=()=>setPaper(!paper);
+$('flipCam').onclick=()=>{facing=facing==='environment'?'user':'environment';startCam()};
+$('torch').onclick=toggleTorch;
+$('fs').onclick=()=>{const d=document;if(!d.fullscreenElement)d.documentElement.requestFullscreen?.().catch(()=>toast('Fullscreen n/a'));else d.exitFullscreen()};
+$('min').onclick=()=>{ui.classList.toggle('min');$('min').textContent=ui.classList.contains('min')?'Show UI':'Hide UI'};
+$('op').oninput=e=>{opacity=e.target.value/100;$('opv').textContent=e.target.value+'%';apply()};
+let skT;$('sk').oninput=e=>{sketch=+e.target.value;$('skv').textContent=sketch?sketch+'%':'off';clearTimeout(skT);skT=setTimeout(render,120)};
+$('lock').onclick=()=>{locked=!locked;$('lock').textContent=locked?'🔒 Locked':'🔓 Lock';$('lock').classList.toggle('on',locked);toast(locked?'Locked':'Unlocked');pts.clear()};
+$('fh').onclick=()=>{T.fh*=-1;apply()}; $('fv').onclick=()=>{T.fv*=-1;apply()};
+$('rot').onclick=()=>{T.r+=Math.PI/2;apply()};
+$('gridB').onclick=()=>{const g=$('grid');const on=g.style.display!=='block';g.style.display=on?'block':'none';$('gridB').classList.toggle('on',on)};
+$('bw').onclick=()=>{bw=!bw;$('bw').classList.toggle('on',bw);render()};
+$('reset').onclick=()=>{if(locked)return toast('Unlock first');fitReset()};
+apply();
+if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
+})();
+</script>
+</body>
+</html>
