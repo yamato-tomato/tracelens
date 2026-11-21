@@ -14,7 +14,7 @@
   const RNAME = Object.fromEntries(REGIONS);
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const toast = t => window.TraceLens && window.TraceLens.toast(t);
+  const toast = (t, ms) => window.TraceLens && window.TraceLens.toast(t, ms);
 
   /* ---------- storage ---------- */
   let dbp = null;
@@ -42,7 +42,7 @@
 
   let builtins = [];
   fetch('library/index.json').then(r => r.ok ? r.json() : []).then(j => {
-    builtins = (Array.isArray(j) ? j : []).map((b, i) => ({ id: 'b' + i, region: b.region, label: b.label, src: 'library/' + b.file, credit: b.credit || '', builtin: true }));
+    builtins = (Array.isArray(j) ? j : []).map((b, i) => ({ id: 'b' + i, region: b.region, label: b.label, src: 'library/' + b.file, thumb: b.thumb ? 'library/' + b.thumb : '', credit: b.credit || '', builtin: true }));
     if (open) render();
   }).catch(() => {});
 
@@ -88,8 +88,8 @@
 #lib .chip b{opacity:.6;font-weight:500;margin-left:4px}
 #lib input[type=search]{margin:0 12px 10px;background:#1c1c20;border:1px solid #333;color:#fff;border-radius:10px;padding:9px 12px;font-size:15px}
 #lib .grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;padding:0 12px 12px;align-content:start;touch-action:pan-y}
-#lib .tile{position:relative;background:#fff;border-radius:10px;overflow:hidden;aspect-ratio:3/4;border:0;padding:0}
-#lib .tile img{width:100%;height:100%;object-fit:contain;display:block}
+#lib .tile{position:relative;background:#fff;border-radius:10px;overflow:hidden;aspect-ratio:3/4;min-height:0;border:0;padding:0}
+#lib .tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
 #lib .tile .cap{position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.62);color:#fff;font-size:11px;padding:4px 6px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #lib .tile .more{position:absolute;top:4px;right:4px;width:30px;height:30px;border-radius:15px;border:0;background:rgba(0,0,0,.55);color:#fff;font-size:16px;line-height:30px;padding:0}
 #lib .empty{grid-column:1/-1;color:#9aa0a6;text-align:center;padding:40px 16px}
@@ -133,14 +133,14 @@
     $('#libChips', el).innerHTML = [['all', 'All']].concat(REGIONS).map(([k, v]) =>
       `<button class="chip${k === region ? ' on' : ''}" data-r="${k}">${v}<b>${count(k)}</b></button>`).join('');
     const ql = q.trim().toLowerCase();
-    const shown = items.filter(i => (region === 'all' || i.region === region) && (!ql || (i.label + ' ' + (RNAME[i.region] || '')).toLowerCase().includes(ql)));
+    const shown = items.filter(i => (region === 'all' || i.region === region) && (!ql || (i.label + ' ' + (RNAME[i.region] || '') + ' ' + (i.credit || '')).toLowerCase().includes(ql)));
     const g = $('#libGrid', el);
     if (!shown.length) {
       g.innerHTML = `<div class="empty">${region === 'all' ? 'No images yet.' : 'No images in ' + esc(RNAME[region]) + ' yet.'}<br><br>Tap <b>+ Add images</b> to save reference diagrams here.<br>Name each with its view, e.g. "palmar", "left lateral".</div>`;
       return;
     }
     g.innerHTML = shown.map(i => {
-      let src = i.src; if (!i.builtin) { src = URL.createObjectURL(i.thumb || i.blob); urls.push(src); }
+      let src = i.thumb || i.src; if (!i.builtin) { src = URL.createObjectURL(i.thumb || i.blob); urls.push(src); }
       return `<button class="tile" data-id="${esc(i.id)}"><img src="${src}" alt="" loading="lazy"><span class="cap">${esc(i.label || '')}${region === 'all' ? ' · ' + esc(RNAME[i.region] || '') : ''}</span>${i.builtin ? '' : '<span class="more" data-edit="1">⋯</span>'}</button>`;
     }).join('');
     g._items = Object.fromEntries(shown.map(i => [i.id, i]));
@@ -158,7 +158,7 @@
     try {
       const blob = it.builtin ? await (await fetch(it.src)).blob() : it.blob;
       hide(); window.TraceLens.useImage(blob);
-      if (it.credit) toast(it.credit);
+      if (it.credit) setTimeout(() => toast(it.credit, 4000), 1200);
     } catch (err) { toast('Could not open image'); }
   });
   $('#libClose', el).onclick = hide;
