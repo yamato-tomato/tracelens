@@ -55,8 +55,8 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
   <img id="ov" alt="">
   <div id="hint">
     <h1>TraceLens</h1>
-    <p>Pick an image, point phone at paper, trace the see-through overlay. Works offline. No ads, no tracking.</p>
-    <button class="big" id="pickBig">Choose image</button>
+    <p>Pick a reference diagram, point phone at paper, trace the see-through overlay. For steady tracing, draw on the printable tracking sheet (link in Library). Works offline. No ads, no tracking.</p>
+    <button class="big" id="pickBig">Open library</button>
     <button class="big alt" id="paperBig">Lightbox mode (no camera)</button>
   </div>
 </div>
@@ -66,7 +66,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 
 <div id="ui" class="hidden">
   <div id="top">
-    <button class="btn" id="pick">Image</button>
+    <button class="btn" id="pick">Library</button>
     <button class="btn" id="mode">Lightbox</button>
     <button class="btn" id="flipCam">⟲ Cam</button>
     <button class="btn" id="torch">Torch</button>
@@ -341,11 +341,15 @@ document.addEventListener('gesturestart',e=>e.preventDefault()); // iOS Safari p
 
 /* ---------- controls ---------- */
 const openPicker=()=>file.click();
-file.onchange=async()=>{const f=file.files[0];file.value='';if(!f)return;
-  const first=!srcImg; loadFile(f);
-  if(first){hint.classList.add('hidden');ui.classList.remove('hidden');if(!paper)await startCam();keepAwake()}};
-$('pickBig').onclick=openPicker; $('pick').onclick=openPicker;
-$('paperBig').onclick=()=>{setPaper(true);openPicker()};
+async function useImage(blob){
+  const first=!srcImg; loadFile(blob);
+  if(first){hint.classList.add('hidden');ui.classList.remove('hidden');if(!paper)await startCam();keepAwake()}
+}
+window.TraceLens={useImage,toast};
+file.onchange=()=>{const f=file.files[0];file.value='';if(f)useImage(f)};
+const openLib=()=>window.TraceLensLibrary?window.TraceLensLibrary.open():openPicker();
+$('pickBig').onclick=openLib; $('pick').onclick=openLib;
+$('paperBig').onclick=()=>{setPaper(true);openLib()};
 $('mode').onclick=()=>setPaper(!paper);
 $('flipCam').onclick=()=>{stopAnchor();facing=facing==='environment'?'user':'environment';startCam()};
 $('torch').onclick=toggleTorch;
@@ -370,5 +374,6 @@ apply();
 if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
 })();
 </script>
+<script src="library.js"></script>
 </body>
 </html>
