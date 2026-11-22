@@ -87,9 +87,9 @@
 #lib .chip.on{background:#4da3ff;color:#fff}
 #lib .chip b{opacity:.6;font-weight:500;margin-left:4px}
 #lib input[type=search]{margin:0 12px 10px;background:#1c1c20;border:1px solid #333;color:#fff;border-radius:10px;padding:9px 12px;font-size:15px}
-#lib .grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;padding:0 12px 12px;align-content:start;touch-action:pan-y}
-#lib .tile{position:relative;background:#fff;border-radius:10px;overflow:hidden;aspect-ratio:3/4;min-height:0;border:0;padding:0}
-#lib .tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+#lib .grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;padding:0 12px 12px;align-content:start;grid-auto-rows:max-content;touch-action:pan-y}
+#lib .tile{position:relative;display:block;width:100%;background:#fff;border-radius:10px;overflow:hidden;border:0;padding:0;margin:0}#lib .tile .ph{display:block;padding-top:133%}
+#lib .tile img{position:absolute;top:4px;left:4px;width:calc(100% - 8px);height:calc(100% - 26px);object-fit:contain;display:block}
 #lib .tile .cap{position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.62);color:#fff;font-size:11px;padding:4px 6px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #lib .tile .more{position:absolute;top:4px;right:4px;width:30px;height:30px;border-radius:15px;border:0;background:rgba(0,0,0,.55);color:#fff;font-size:16px;line-height:30px;padding:0}
 #lib .empty{grid-column:1/-1;color:#9aa0a6;text-align:center;padding:40px 16px}
@@ -141,7 +141,7 @@
     }
     g.innerHTML = shown.map(i => {
       let src = i.thumb || i.src; if (!i.builtin) { src = URL.createObjectURL(i.thumb || i.blob); urls.push(src); }
-      return `<button class="tile" data-id="${esc(i.id)}"><img src="${src}" alt="" loading="lazy"><span class="cap">${esc(i.label || '')}${region === 'all' ? ' · ' + esc(RNAME[i.region] || '') : ''}</span>${i.builtin ? '' : '<span class="more" data-edit="1">⋯</span>'}</button>`;
+      return `<button class="tile" data-id="${esc(i.id)}"><span class="ph"></span><img src="${src}" alt="" loading="lazy"><span class="cap">${esc(i.label || '')}${region === 'all' ? ' · ' + esc(RNAME[i.region] || '') : ''}</span>${i.builtin ? '' : '<span class="more" data-edit="1">⋯</span>'}</button>`;
     }).join('');
     g._items = Object.fromEntries(shown.map(i => [i.id, i]));
   }
